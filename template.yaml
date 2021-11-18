@@ -1,0 +1,2213 @@
+# /*
+# * Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# *
+# * Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# * software and associated documentation files (the "Software"), to deal in the Software
+# * without restriction, including without limitation the rights to use, copy, modify,
+# * merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# * permit persons to whom the Software is furnished to do so.
+# *
+# * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+# */
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation template for deploying the Temporary Elevated Access Broker
+  solution
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Group Setup
+        Parameters:
+          - SearchPrefix
+          - ReviewerGroup
+          - AuditorGroup
+      - Label:
+          default: API Gateway Setup
+        Parameters:
+          - Stage
+      - Label:
+          default: Okta Setup
+        Parameters:
+          - ClientId
+          - JWTIssuer
+          - Audience
+      - Label:
+          default: Notifications Setup
+        Parameters:
+          - ApprovalSNSTopicName
+          - SubscriptionEndPoint
+          - SubscriptionProtocol
+          - SenderSESAddress
+      - Label:
+          default: DynamoDB Setup
+        Parameters:
+          - DBTableName
+          - PointInTimeRecovery
+      - Label:
+          default: Logging Setup
+        Parameters:
+          - RetentionInDays
+Parameters:
+  ApprovalSNSTopicName:
+    Type: String
+    Description: >-
+      A name for the SNS topic that will receive the approval notifications.
+    AllowedPattern: '^[a-zA-Z]+[0-9a-zA-Z_-]*$'
+    ConstraintDescription: Must start with a letter. Only numbers, letters, -, and _ accepted. Max. length 64 characters.
+    MinLength: '1'
+    MaxLength: '64'
+  SubscriptionEndPoint:
+    Type: String
+    Description: >-
+      The endpoint (i.e. email address) for the Amazon SNS topic. Once you
+      subscribe an endpoint to a topic and the subscription is confirmed, the
+      endpoint will receive all messages published to that topic.
+  SubscriptionProtocol:
+    Type: String
+    Description: The subscription's protocol.
+    AllowedValues:
+      - http
+      - https
+      - email
+      - email-json
+      - sms
+      - sqs
+      - application
+      - lambda
+    Default: email
+  SenderSESAddress:
+    Description: >-
+      The email address that is sending the notification emails. NOTE: This
+      email address must be either individually verified with Amazon SES, or
+      from a domain that has been verified with Amazon SES. For information
+      about verifying identities, see the Amazon SES Developer Guide:
+      https://docs.aws.amazon.com/ses/latest/DeveloperGuide/verify-addresses-and-domains.html
+    Type: String
+  SearchPrefix:
+    Description: >-
+      Group search prefix (ie aws-temp). All groups should be created with
+      this prefix to simplify the identification of roles in AWS that are
+      accessed through the federated authentication process.
+    Type: String
+    Default: aws-temp
+  ReviewerGroup:
+    Description: Group for determining Reviewer eligibility
+    Type: String
+    Default: aws-temp#Reviewer
+  AuditorGroup:
+    Description: Group for determining Auditor eligibility
+    Type: String
+    Default: aws-temp#Auditor
+  RetentionInDays:
+    Type: String
+    Description: The number of days to retain the log events
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 150
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1827
+      - 3653
+  DBTableName:
+    Type: String
+    Description: A name for the DynamoDB table
+    Default: request
+    AllowedPattern: '[a-zA-Z0-9]*'
+    MinLength: 3
+    MaxLength: 255
+    ConstraintDescription: Must contain only alphanumberic characters
+  PointInTimeRecovery:
+    Type: String
+    Description: >-
+      Indicates whether point in time recovery is enabled (true) or disabled
+      (false) on the table
+    AllowedValues:
+      - true
+      - false
+    Default: true
+  Stage:
+    Type: String
+    Description: The stage where the application is running in, e.g., staging, dev, prod.
+    Default: dev
+    AllowedPattern: '[a-z0-9]+'
+  JWTIssuer:
+    Type: String
+    Description: >-
+      This is the URL of the authorization server that will perform
+      authentication. All Developer Accounts have a "default" authorization
+      server. The issuer is a combination of your Org URL (found in the upper
+      right of the console home page) and /oauth2/default. For example,
+      https://dev-1234.oktapreview.com/oauth2/default.
+    AllowedPattern: '(?i)https://(.*)'
+    ConstraintDescription: Enter a valid HTTPS URL
+  ClientId:
+    Type: String
+    Description: >-
+      The client ID of the SPA application. This can be found on the "General"
+      tab of an application, or the list of applications. This identifies the
+      application that tokens will be minted for.
+  Audience:
+    Type: String
+    Description: >-
+      The expected audience passed to verifyAccessToken(). This can be either a
+      string (direct match) or an array of strings (the actual aud claim in the
+      token must match one of the strings). In the general case, the "aud" value
+      is an array of case sensitive strings, each containing a StringOrURI
+      value.
+Resources:
+  OriginAccessIdentity:
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'Static assets for the React application in ${AWS::StackName}'
+  WebBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub '${AWS::Region}-${AWS::AccountId}-cf-static-resources'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  WebBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    DependsOn: OriginAccessIdentity
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource: !Join 
+              - ''
+              - - !GetAtt 
+                  - WebBucket
+                  - Arn
+                - /*
+            Principal:
+              CanonicalUser: !GetAtt 
+                - OriginAccessIdentity
+                - S3CanonicalUserId
+  CloudFrontCachePolicy:
+    Type: 'AWS::CloudFront::CachePolicy'
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Sub '${AWS::StackName}-cache-policy'
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Access-Control-Request-Headers
+              - Access-Control-Request-Method
+              - Origin
+              - Authorization
+          CookiesConfig:
+            CookieBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+  Distribution:
+    Type: 'AWS::CloudFront::Distribution'
+    DependsOn: OriginAccessIdentity
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          CachePolicyId: !Ref CloudFrontCachePolicy
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          Compress: false
+          ViewerProtocolPolicy: redirect-to-https
+          TargetOriginId: Bucket
+          LambdaFunctionAssociations:
+            - EventType: origin-response
+              LambdaFunctionARN: !Ref OriginResponseLambdaFunctionVersion
+        Origins:
+          - Id: Bucket
+            DomainName: !GetAtt 
+              - WebBucket
+              - RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Join 
+                - /
+                - - origin-access-identity
+                  - cloudfront
+                  - !Ref OriginAccessIdentity
+  LambdaEdgeFunctionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+        Path: "/"
+        ManagedPolicyArns:
+            - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+            - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Sid: "AllowLambdaServiceToAssumeRole"
+              Effect: "Allow"
+              Action: 
+                - "sts:AssumeRole"
+              Principal:
+                Service: 
+                  - "lambda.amazonaws.com"
+                  - "edgelambda.amazonaws.com"
+  OriginResponseLambdaFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref OriginResponseLambdaFunction
+      Description: !Sub "Version published for Lambda@Edge"
+  DynamoDBUpdatePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-DynamoDBUpdatePolicy'
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'dynamodb:List*'
+              - 'dynamodb:DescribeReservedCapacity*'
+              - 'dynamodb:DescribeLimits'
+              - 'dynamodb:DescribeTimeToLive'
+            Effect: Allow
+            Resource: !Sub >-
+              arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*
+          - Action:
+              - 'dynamodb:BatchGet*'
+              - 'dynamodb:DescribeStream'
+              - 'dynamodb:DescribeTable'
+              - 'dynamodb:Get*'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'dynamodb:BatchWrite*'
+              - 'dynamodb:CreateTable'
+              - 'dynamodb:Delete*'
+              - 'dynamodb:Update*'
+              - 'dynamodb:PutItem'
+            Effect: Allow
+            Resource: !Sub >-
+              arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DBTableName}*
+  DynamoDBReadPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-DynamoDBReadPolicy'
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'dynamodb:List*'
+              - 'dynamodb:DescribeReservedCapacity*'
+              - 'dynamodb:DescribeLimits'
+              - 'dynamodb:DescribeTimeToLive'
+            Effect: Allow
+            Resource: !Sub >-
+              arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*
+          - Action:
+              - 'dynamodb:BatchGet*'
+              - 'dynamodb:DescribeStream'
+              - 'dynamodb:DescribeTable'
+              - 'dynamodb:Get*'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+            Effect: Allow
+            Resource: !Sub >-
+              arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DBTableName}*
+  KMSDecryptPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-KMSDecryptPolicy'
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'kms:Decrypt'
+            Effect: Allow
+            Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/dynamodb'
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Lambda-Execution-Role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+  LambdaDBStreamRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Lambda-DynamoDBStream-Role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSLambdaInvocation-DynamoDB'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+        - !Ref DynamoDBUpdatePolicy
+        - !Ref KMSDecryptPolicy
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-DBStream-MessagingPolicy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: !Ref ApprovalSNSTopic
+                Action:
+                  - 'sns:Publish'
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - 'ses:SendEmail'
+  LambdaDBWriteRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Lambda-DynamoDBWrite-Role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+        - !Ref DynamoDBUpdatePolicy
+        - !Ref KMSDecryptPolicy
+  LambdaDBReadRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Lambda-DynamoDBRead-Role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+        - !Ref DynamoDBReadPolicy
+        - !Ref KMSDecryptPolicy
+  LambdaIdentityBrokerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Lambda-IdentityBroker-Role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+        - !Ref DynamoDBReadPolicy
+        - !Ref KMSDecryptPolicy
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-LambdaSTS-Policy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - 'sts:AssumeRole'
+  ApprovalSNSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Ref ApprovalSNSTopicName
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+        - Endpoint: !Ref SubscriptionEndPoint
+          Protocol: !Ref SubscriptionProtocol
+  OriginResponseLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-cf_origin_response'
+      RetentionInDays: !Ref RetentionInDays
+  DynamodbstreamLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-dynamodb_stream'
+      RetentionInDays: !Ref RetentionInDays
+  CustomauthorizerLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-custom_authorizer'
+      RetentionInDays: !Ref RetentionInDays
+  HttpoptionshandlerLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-http_options_handler'
+      RetentionInDays: !Ref RetentionInDays
+  GetrequestsLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-get_requests'
+      RetentionInDays: !Ref RetentionInDays
+  GetpendingrequestsLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-get_pending_requests'
+      RetentionInDays: !Ref RetentionInDays
+  CreaterequestLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-create_request'
+      RetentionInDays: !Ref RetentionInDays
+  DeleterequestLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-delete_request'
+      RetentionInDays: !Ref RetentionInDays
+  GetprocessedrequestsLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-get_processed_requests'
+      RetentionInDays: !Ref RetentionInDays
+  GetallrequestsLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-get_all_requests'
+      RetentionInDays: !Ref RetentionInDays
+  ApproverequestLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-approve_request'
+      RetentionInDays: !Ref RetentionInDays
+  RejectrequestLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-reject_request'
+      RetentionInDays: !Ref RetentionInDays
+  FederateconsoleLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-federate_console'
+      RetentionInDays: !Ref RetentionInDays
+  FederatecliLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-federate_cli'
+      RetentionInDays: !Ref RetentionInDays
+  OriginResponseLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          'use strict';
+          exports.handler = (event, context, callback) => {
+              const response = event.Records[0].cf.response;
+              const content = `
+                  <\!DOCTYPE html>
+                  <html lang="en">
+                    <head>
+                      <meta charset="utf-8">
+                      <title>Access Denied by the Origin Server</title>
+                    </head>
+                    <body>
+                      <h1>Access Denied by the Origin Server</h1>
+                    </body>
+                  </html>
+                  `;
+              if (response.status == 403) {
+                  //Response Status Code and Description
+                  response.status = 302;
+                  response.statusDescription = 'Found';  
+                  // Drop the body, as it is not required for redirects 
+                  response.body = '';
+                  //Set the Redirect Location
+                  response.headers['location'] = [{ key: 'Location', value: '/' }]; 
+              }
+                  callback(null, response);
+          };
+      Handler: index.handler
+      FunctionName: !Sub '${AWS::StackName}-cf_origin_response'
+      MemorySize: 128
+      Timeout: 5
+      Role: !Sub ${LambdaEdgeFunctionRole.Arn}
+      Runtime: nodejs14.x
+      TracingConfig:
+        Mode: Active
+    DependsOn:
+      - OriginResponseLogGroup
+  LambdaLayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      Content: lambda-layer/
+      LayerName: temporary-elevated-access-broker-python
+      Description: Python layer for Temporary Elevated Access Broker
+      LicenseInfo: MIT License
+      CompatibleRuntimes:
+        - python3.8
+        - python3.9
+  LambdaLayerPermission:
+    Type: 'AWS::Lambda::LayerVersionPermission'
+    Properties:
+      Action: 'lambda:GetLayerVersion'
+      LayerVersionArn: !Ref LambdaLayer
+      Principal: !Ref AWS::AccountId
+  DynamodbStreamLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: dynamodb-stream/
+      Handler: dbstream.lambda_handler
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-dynamodb_stream'
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          cloudfront_url: !Join 
+            - ''
+            - - 'https://'
+              - !GetAtt 
+                - Distribution
+                - DomainName
+          topic_arn: !Ref ApprovalSNSTopic
+          ses_email: !Ref SenderSESAddress
+      Role: !GetAtt 
+        - LambdaDBStreamRole
+        - Arn
+      TracingConfig:
+        Mode: Active
+    DependsOn:
+      - DynamodbstreamLogGroup
+  CustomauthorizerLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: okta-authorizer/
+      Handler: index.handler
+      Runtime: nodejs14.x
+      FunctionName: !Sub '${AWS::StackName}-custom_authorizer'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      Environment:
+        Variables:
+          api_ARN: !Sub >-
+            arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}
+          api_stage: !Ref Stage
+          jwt_issuer: !Ref JWTIssuer
+          clientId: !Ref ClientId
+          aud: !Ref Audience
+      TracingConfig:
+        Mode: Active
+    DependsOn:
+      - CustomauthorizerLogGroup
+      - ApiGatewayRestApi
+  HttpoptionshandlerLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.lambda_handler
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-http_options_handler'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - HttpoptionshandlerLogGroup
+  GetrequestsLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.get_requests
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-get_requests'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaDBWriteRole
+        - Arn
+      Environment:
+        Variables:
+          db_table: !Ref DBTableName
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - GetrequestsLogGroup
+  GetpendingrequestsLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.get_pending_requests
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-get_pending_requests'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaDBReadRole
+        - Arn
+      Environment:
+        Variables:
+          db_table: !Ref DBTableName
+          reviewer_group: !Ref ReviewerGroup
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - GetpendingrequestsLogGroup
+  CreaterequestLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.create_request
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-create_request'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaDBWriteRole
+        - Arn
+      Environment:
+        Variables:
+          db_table: !Ref DBTableName
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - CreaterequestLogGroup
+  DeleterequestLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.delete_request
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-delete_request'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaDBWriteRole
+        - Arn
+      Environment:
+        Variables:
+          db_table: !Ref DBTableName
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - DeleterequestLogGroup
+  GetprocessedrequestsLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.get_processed_requests
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-get_processed_requests'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaDBReadRole
+        - Arn
+      Environment:
+        Variables:
+          db_table: !Ref DBTableName
+          reviewer_group: !Ref ReviewerGroup
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - GetprocessedrequestsLogGroup
+  GetallrequestsLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.get_all_requests
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-get_all_requests'
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt 
+        - LambdaDBReadRole
+        - Arn
+      Environment:
+        Variables:
+          db_table: !Ref DBTableName
+          auditor_group: !Ref AuditorGroup
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - GetallrequestsLogGroup
+  ApproverequestLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.approve_request
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-approve_request'
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          reviewer_group: !Ref ReviewerGroup
+          db_table: !Ref DBTableName
+      Role: !GetAtt 
+        - LambdaDBWriteRole
+        - Arn
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - ApproverequestLogGroup
+  RejectrequestLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.reject_request
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-reject_request'
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          reviewer_group: !Ref ReviewerGroup
+          db_table: !Ref DBTableName
+      Role: !GetAtt 
+        - LambdaDBWriteRole
+        - Arn
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - RejectrequestLogGroup
+  FederateconsoleLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.federate_console
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-federate_console'
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          search_prefix: !Ref SearchPrefix
+          db_table: !Ref DBTableName
+      Role: !GetAtt 
+        - LambdaIdentityBrokerRole
+        - Arn
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - FederateconsoleLogGroup
+  FederatecliLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ui-api/
+      Handler: api.federate_cli
+      Runtime: python3.9
+      FunctionName: !Sub '${AWS::StackName}-federate_cli'
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          search_prefix: !Ref SearchPrefix
+          db_table: !Ref DBTableName
+      Role: !GetAtt 
+        - LambdaIdentityBrokerRole
+        - Arn
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref LambdaLayer
+    DependsOn:
+      - FederatecliLogGroup
+  ApiGatewayRestApi:
+    Type: 'AWS::ApiGateway::RestApi'
+    DependsOn: ApiCWLRoleArn
+    Properties:
+      Name: !Sub '${AWS::StackName}-ui-api-${Stage}'
+      EndpointConfiguration:
+        Types:
+          - EDGE
+      Policy: ''
+  ApiGatewayResourceGetrequests:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: get_requests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceGetpendingrequests:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: get_pending_requests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceCreaterequest:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: create_request
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceDeleterequest:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: delete_request
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceGetprocessedrequests:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: get_processed_requests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceGetallrequests:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: get_all_requests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceApproverequest:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: approve_request
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceRejectrequest:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: reject_request
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceFederateconsole:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: federate_console
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayResourceFederatecli:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: federate_cli
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: AWS_PROXY
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+        IntegrationHttpMethod: POST
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - HttpoptionshandlerLambdaFunction
+              - Arn
+            - /invocations
+      ResourceId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+  ApiGatewayMethodGetrequestsOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,GET'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceGetrequests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodGetpendingrequestsOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,GET'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceGetpendingrequests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodCreaterequestOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,POST'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceCreaterequest
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodDeleterequestOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,POST'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceDeleterequest
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodGetprocessedrequestsOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,GET'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceGetprocessedrequests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodGetallrequestsOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,GET'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceGetallrequests
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodApproverequestOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,POST'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceApproverequest
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodRejectrequestOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,POST'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceRejectrequest
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodFederateconsoleOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,GET'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceFederateconsole
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodFederatecliOptions:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+          ResponseModels: {}
+      RequestParameters: {}
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+              method.response.header.Access-Control-Allow-Headers: >-
+                'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'
+              method.response.header.Access-Control-Allow-Methods: '''OPTIONS,GET'''
+            ResponseTemplates:
+              application/json: >-
+                #set($origin = $input.params("Origin"))
+
+                #if($origin == "") #set($origin = $input.params("origin")) #end
+
+                #if($origin.matches(".+"))
+                #set($context.responseOverride.header.Access-Control-Allow-Origin
+                = $origin) #end
+      ResourceId: !Ref ApiGatewayResourceFederatecli
+      RestApiId: !Ref ApiGatewayRestApi
+  ApiGatewayMethodGetrequestsGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceGetrequests
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - GetrequestsLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodGetpendingrequestsGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceGetpendingrequests
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - GetpendingrequestsLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodCreaterequestPost:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceCreaterequest
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - CreaterequestLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodDeleterequestPost:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceDeleterequest
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - DeleterequestLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodGetprocessedrequestsGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceGetprocessedrequests
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - GetprocessedrequestsLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodGetallrequestsGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceGetallrequests
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - GetallrequestsLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodApproverequestPost:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceApproverequest
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - ApproverequestLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodRejectrequestPost:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceRejectrequest
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - RejectrequestLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodFederateconsoleGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceFederateconsole
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - FederateconsoleLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+  ApiGatewayMethodFederatecliGet:
+    Type: 'AWS::ApiGateway::Method'
+    DependsOn: CustomauthorizerApiGatewayAuthorizer
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceFederatecli
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: true
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref CustomauthorizerApiGatewayAuthorizer
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - FederatecliLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+  CustomauthorizerApiGatewayAuthorizer:
+    Type: 'AWS::ApiGateway::Authorizer'
+    DependsOn: CustomauthorizerLambdaFunction
+    Properties:
+      IdentitySource: method.request.header.Authorization
+      Name: custom_authorizer
+      RestApiId: !Ref ApiGatewayRestApi
+      AuthorizerUri: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':apigateway:'
+          - !Ref 'AWS::Region'
+          - ':lambda:path/2015-03-31/functions/'
+          - !GetAtt 
+            - CustomauthorizerLambdaFunction
+            - Arn
+          - /invocations
+      Type: TOKEN
+  ApiGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+    DependsOn:
+      - ApiGatewayMethodOptions
+      - ApiGatewayMethodGetrequestsOptions
+      - ApiGatewayMethodGetpendingrequestsOptions
+      - ApiGatewayMethodCreaterequestOptions
+      - ApiGatewayMethodDeleterequestOptions
+      - ApiGatewayMethodGetprocessedrequestsOptions
+      - ApiGatewayMethodGetallrequestsOptions
+      - ApiGatewayMethodApproverequestOptions
+      - ApiGatewayMethodRejectrequestOptions
+      - ApiGatewayMethodFederateconsoleOptions
+      - ApiGatewayMethodFederatecliOptions
+      - ApiGatewayMethodGetrequestsGet
+      - ApiGatewayMethodGetpendingrequestsGet
+      - ApiGatewayMethodCreaterequestPost
+      - ApiGatewayMethodDeleterequestPost
+      - ApiGatewayMethodGetprocessedrequestsGet
+      - ApiGatewayMethodGetallrequestsGet
+      - ApiGatewayMethodApproverequestPost
+      - ApiGatewayMethodRejectrequestPost
+      - ApiGatewayMethodFederateconsoleGet
+      - ApiGatewayMethodFederatecliGet
+  ApiGatewayApiKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    DependsOn: ApiStage
+    Properties:
+      Enabled: true
+      Name: !Sub '${AWS::StackName}-API-Key'
+      StageKeys:
+        - RestApiId: !Ref ApiGatewayRestApi
+          StageName: !Ref Stage
+  ApiGatewayUsagePlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    DependsOn: ApiStage
+    Properties:
+      ApiStages:
+        - ApiId: !Ref ApiGatewayRestApi
+          Stage: !Ref Stage
+      Description: !Sub '${AWS::StackName}-API usage plan'
+      UsagePlanName: !Sub '${AWS::StackName}-ui-api-${Stage}'
+  ApiGatewayUsagePlanKey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Ref ApiGatewayApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiGatewayUsagePlan
+  HttpoptionshandlerLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - HttpoptionshandlerLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  GetrequestsLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - GetrequestsLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  CustomauthorizerLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    DependsOn: CustomauthorizerLambdaFunction
+    Properties:
+      FunctionName: !GetAtt 
+        - CustomauthorizerLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  GetpendingrequestsLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - GetpendingrequestsLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  CreaterequestLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - CreaterequestLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  DeleterequestLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - DeleterequestLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  GetprocessedrequestsLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - GetprocessedrequestsLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  GetallrequestsLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - GetallrequestsLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  ApproverequestLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - ApproverequestLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  RejectrequestLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - RejectrequestLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  FederateconsoleLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - FederateconsoleLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  FederatecliLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - FederatecliLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+  ApiGatewayLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/api-gateway/${AWS::StackName}-ui-api-${Stage}'
+      RetentionInDays: !Ref RetentionInDays
+  ApiCWLRoleArn:
+    Type: 'AWS::ApiGateway::Account'
+    Properties:
+      CloudWatchRoleArn: !GetAtt 
+        - CloudWatchRole
+        - Arn
+  ApiStage:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      AccessLogSetting:
+        DestinationArn: !Sub '${ApiGatewayLogGroup.Arn}'
+        Format: >-
+          { 'requestId':'$context.requestId', 'ip':
+          '$context.identity.sourceIp', 'caller':'$context.identity.caller',
+          'user':'$context.identity.user','requestTime':'$context.requestTime',
+          'xrayTraceId':'$context.xrayTraceId',
+          'wafResponseCode':'$context.wafResponseCode',
+          'httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath',
+          'status':'$context.status','protocol':'$context.protocol',
+          'responseLength':'$context.responseLength' }
+      MethodSettings:
+        - MetricsEnabled: true
+          ResourcePath: /*
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+      TracingEnabled: true
+      DeploymentId: !Ref ApiGatewayDeployment
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: !Ref Stage
+  CloudWatchRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      ManagedPolicyArns:
+        - >-
+          arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Action: 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+  DynamodbstreamEventSourceMappingDynamodbRequestTable:
+    Type: 'AWS::Lambda::EventSourceMapping'
+    Properties:
+      BatchSize: 1
+      EventSourceArn: !GetAtt 
+        - requestTable
+        - StreamArn
+      FunctionName: !GetAtt 
+        - DynamodbStreamLambdaFunction
+        - Arn
+      StartingPosition: LATEST
+      Enabled: true
+  requestTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: !Ref DBTableName
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: request_time
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: requester
+          AttributeType: S
+        - AttributeName: request_status
+          AttributeType: S
+        - AttributeName: request_time
+          AttributeType: S
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      GlobalSecondaryIndexes:
+        - IndexName: requester-index
+          KeySchema:
+            - AttributeName: requester
+              KeyType: HASH
+            - AttributeName: request_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+        - IndexName: request-status-index
+          KeySchema:
+            - AttributeName: request_status
+              KeyType: HASH
+            - AttributeName: request_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+      TimeToLiveSpecification:
+        AttributeName: request_ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref PointInTimeRecovery
+  RequestTableWriteCapacityScalableTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: requestTable
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub 'table/${DBTableName}'
+      RoleARN: !Sub >-
+        arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable
+      ScalableDimension: 'dynamodb:table:WriteCapacityUnits'
+      ServiceNamespace: dynamodb
+  RequestTableWriteScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: WriteAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref RequestTableWriteCapacityScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: DynamoDBWriteCapacityUtilization
+  RequestIndexWriteCapacityScalableTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: requestTable
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub 'table/${DBTableName}/index/requester-index'
+      RoleARN: !Sub >-
+        arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable
+      ScalableDimension: 'dynamodb:index:WriteCapacityUnits'
+      ServiceNamespace: dynamodb
+  RequestStatusWriteCapacityScalableTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: requestTable
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub 'table/${DBTableName}/index/request-status-index'
+      RoleARN: !Sub >-
+        arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable
+      ScalableDimension: 'dynamodb:index:WriteCapacityUnits'
+      ServiceNamespace: dynamodb
+  RequestTableReadCapacityScalableTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: requestTable
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub 'table/${DBTableName}'
+      RoleARN: !Sub >-
+        arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable
+      ScalableDimension: 'dynamodb:table:ReadCapacityUnits'
+      ServiceNamespace: dynamodb
+  RequestTableReadScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: WriteAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref RequestTableReadCapacityScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: DynamoDBReadCapacityUtilization
+  RequestIndexReadCapacityScalableTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: requestTable
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub 'table/${DBTableName}/index/requester-index'
+      RoleARN: !Sub >-
+        arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable
+      ScalableDimension: 'dynamodb:index:ReadCapacityUnits'
+      ServiceNamespace: dynamodb
+  RequestStatusReadCapacityScalableTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: requestTable
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub 'table/${DBTableName}/index/request-status-index'
+      RoleARN: !Sub >-
+        arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable
+      ScalableDimension: 'dynamodb:index:ReadCapacityUnits'
+      ServiceNamespace: dynamodb
+Outputs:
+  ContentBucketName:
+    Description: Name of the S3 bucket for holding static content
+    Value: !Ref WebBucket
+  APIGatewayARN:
+    Description: API Gateway ARN
+    Value: !Sub >-
+      arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}
+  ServiceEndpoint:
+    Description: API service endpoint
+    Value: !Join 
+      - ''
+      - - 'https://'
+        - !Ref ApiGatewayRestApi
+        - .execute-api.
+        - !Ref 'AWS::Region'
+        - .
+        - !Ref 'AWS::URLSuffix'
+        - /
+        - !Ref Stage
+  LambdaIdentityBrokerRole:
+    Description: Role ARN to configure the trust policies of the target roles
+    Value: !GetAtt 
+      - LambdaIdentityBrokerRole
+      - Arn
+  RedirectURI:
+    Description: >-
+      CloudFront distribution that will be used by OAuth providers as a location
+      to deliver the access_token by means of a browser redirect
+    Value: !Join 
+      - ''
+      - - 'https://'
+        - !GetAtt 
+          - Distribution
+          - DomainName
+  ApprovalSNSTopicName:
+    Description: Name of the SNS topic for approval notifications
+    Value: !Ref ApprovalSNSTopicName
+  ApiGatewayKeyValue:
+    Description: CLI command to obtain API key value
+    Value: !Join 
+      - ''
+      - - 'aws apigateway get-api-keys --name-query '
+        - !Sub '${AWS::StackName}-API-Key'
+        - ' --include-value --region '
+        - !Ref AWS::Region
+  JWTIssuer:
+    Description: >-
+      OIDC endpoint domain for authorizing against the Okta Org Authorization Server
+    Value: !Select [2, !Split ['/', !Ref JWTIssuer]]
