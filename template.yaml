@@ -192,6 +192,8 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled 
   WebBucketPolicy:
     Type: 'AWS::S3::BucketPolicy'
     DependsOn: OriginAccessIdentity
