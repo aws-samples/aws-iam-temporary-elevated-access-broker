@@ -16,7 +16,6 @@ const AppLayout: FunctionComponent = ( {children} ) => {
 
     return <SideNavigationBase
         header={{text: 'Demo', href: '/'}}
-        expanded={false}
         items={
           getNavigation()
         }
