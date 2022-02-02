@@ -185,7 +185,7 @@ class DatabaseLoader:
             idTokenSplit = idToken.split(' ', 1)[-1]
             decodedToken = jwt.decode(idTokenSplit, algorithms=["RS256"], options={"verify_signature": False})
             groups = decodedToken['groups']
-            requester = decodedToken['email']
+            reviewer = decodedToken['email']
             epochTimeNow = int(time.time()) 
             if REVIEWER_GROUP in groups:
                 response = table.query(
