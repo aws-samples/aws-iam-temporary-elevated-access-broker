@@ -15,6 +15,17 @@ import argparse
 
 patch_all()
 
+# Environment Variables
+DB_TABLE = os.environ['db_table']
+REVIEWER_GROUP = os.environ['reviewer_group']
+AUDITOR_GROUP = os.environ['auditor_group']
+SEARCH_PREFIX = os.environ['search_prefix']
+
+# Boto3 clients and resources
+dynamodb = boto3.resource('dynamodb')
+sts_connection = boto3.client('sts')
+
+
 def enable_logging():
     root = logging.getLogger()
     if root.handlers:
@@ -109,9 +120,7 @@ class DatabaseLoader:
             epochTimeNow = int(time.time()) 
 
             if requester:
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+                table = dynamodb.Table(DB_TABLE)
                 now = datetime.now().strftime('%x %X')
                 response = table.query(
                     IndexName='requester-index',
@@ -170,18 +179,15 @@ class DatabaseLoader:
         status_code = 500
         requests = list()
         try:
-            dynamodb = boto3.resource('dynamodb')
-            dbname = os.environ['db_table']
-            table = dynamodb.Table(dbname)
+            table = dynamodb.Table(DB_TABLE)
             AuthHeader = event['headers']['Authorization']
             idToken = AuthHeader[len('Bearer '):]
             idTokenSplit = idToken.split(' ', 1)[-1]
             decodedToken = jwt.decode(idTokenSplit, algorithms=["RS256"], options={"verify_signature": False})
             groups = decodedToken['groups']
             requester = decodedToken['email']
-            reviewerGroup = os.environ['reviewer_group'] 
             epochTimeNow = int(time.time()) 
-            if reviewerGroup in groups:
+            if REVIEWER_GROUP in groups:
                 response = table.query(
                     IndexName='request-status-index',
                     KeyConditionExpression=Key('request_status').eq('Requested'),
@@ -194,7 +200,7 @@ class DatabaseLoader:
                 result = [request.to_dict() for request in requests]
                 status_code = 200
             else:
-                result = "The idToken for " + reviewer + " does not contain the " + reviewerGroup + " group"
+                result = "The idToken for " + reviewer + " does not contain the " + REVIEWER_GROUP + " group"
                 print(result)
                 status_code = 400
         except Exception as error:
@@ -219,11 +225,8 @@ class DatabaseLoader:
             decodedToken = jwt.decode(idTokenSplit, algorithms=["RS256"], options={"verify_signature": False})
             groups = decodedToken['groups']
             reviewer = decodedToken['email']
-            reviewerGroup = os.environ['reviewer_group'] 
-            if reviewerGroup in groups:
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+            if REVIEWER_GROUP in groups:
+                table = dynamodb.Table(DB_TABLE)
                 scan_kwargs = {
                     'FilterExpression': Attr('request_status').ne('Requested') & Attr('request_status').ne('Expired')
                 }
@@ -260,18 +263,14 @@ class DatabaseLoader:
         status_code = 500
         requests = list()
         try:
-            dynamodb = boto3.resource('dynamodb')
-            dbname = os.environ['db_table']
-            table = dynamodb.Table(dbname)
+            table = dynamodb.Table(DB_TABLE)
             AuthHeader = event['headers']['Authorization']
             idToken = AuthHeader[len('Bearer '):]
             idTokenSplit = idToken.split(' ', 1)[-1]
             decodedToken = jwt.decode(idTokenSplit, algorithms=["RS256"], options={"verify_signature": False})
             reviewer = decodedToken['email']
             groups = decodedToken['groups']
-            auditorGroup = os.environ['auditor_group'] 
-            if auditorGroup in groups:
-                epochTimeNow = int(time.time())
+            if AUDITOR_GROUP in groups:
                 scan_kwargs = {}
                 done = False
                 start_key = None
@@ -287,7 +286,7 @@ class DatabaseLoader:
                 result = [request.to_dict() for request in requests]
                 status_code = 200
             else:
-                result = "The idToken for " + reviewer + " does not contain the " + auditorGroup + " group"
+                result = "The idToken for " + reviewer + " does not contain the " + AUDITOR_GROUP + " group"
                 print(result)
                 status_code = 400
         except Exception as error:
@@ -332,9 +331,7 @@ class DatabaseLoader:
                     'review_time': '',
                     'reviewer': ''
                 }
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+                table = dynamodb.Table(DB_TABLE)
                 table.put_item(Item=request)
                 status_code = 200
             else:
@@ -367,15 +364,12 @@ class DatabaseLoader:
                 decodedToken = jwt.decode(idTokenSplit, algorithms=["RS256"], options={"verify_signature": False})
                 reviewer = decodedToken['email']
                 groups = decodedToken['groups']
-                reviewerGroup = os.environ['reviewer_group'] 
                 now = datetime.now().strftime('%x %X')
                 epochTimeNow = int(time.time()) 
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+                table = dynamodb.Table(DB_TABLE)
                 print("Approve request initiated by " + reviewer + " for the following id: " + id)
-                if reviewerGroup in groups:
-                    print("Verified that the idToken for " + reviewer + " contains the " + reviewerGroup + " group")
+                if REVIEWER_GROUP in groups:
+                    print("Verified that the idToken for " + reviewer + " contains the " + REVIEWER_GROUP + " group")
                     try:
                         table.update_item(
                             Key={
@@ -400,7 +394,7 @@ class DatabaseLoader:
                             print(result)
                             status_code = 400
                 else:
-                    result = "The idToken for " + reviewer + " does not contain the " + reviewerGroup + " group"
+                    result = "The idToken for " + reviewer + " does not contain the " + REVIEWER_GROUP + " group"
                     print(result)
                     status_code = 400
             else:
@@ -432,14 +426,11 @@ class DatabaseLoader:
                 decodedToken = jwt.decode(idTokenSplit, algorithms=["RS256"], options={"verify_signature": False})
                 reviewer = decodedToken['email']
                 groups = decodedToken['groups']
-                reviewerGroup = os.environ['reviewer_group'] 
                 epochTimeNow = int(time.time())
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+                table = dynamodb.Table(DB_TABLE)
                 print("Reject request initiated by " + reviewer + " for the following id: " + id)
-                if reviewerGroup in groups:
-                    print("Verified that the idToken for " + reviewer + " contains the " + reviewerGroup + " group")
+                if REVIEWER_GROUP in groups:
+                    print("Verified that the idToken for " + reviewer + " contains the " + REVIEWER_GROUP + " group")
                     try:
                         table.update_item(
                             Key={
@@ -463,7 +454,7 @@ class DatabaseLoader:
                             print(result)
                             status_code = 400                
                 else:
-                    result = "The idToken for " + reviewer + " does not contain the " + reviewerGroup + " group"
+                    result = "The idToken for " + reviewer + " does not contain the " + REVIEWER_GROUP + " group"
                     print(result)
                     status_code = 400
             else:
@@ -495,9 +486,7 @@ class DatabaseLoader:
                     json_param = json.loads(input_body)
                     id = json_param["id"]
                     request_time = json_param["request_time"]
-                    dynamodb = boto3.resource('dynamodb')
-                    dbname = os.environ['db_table']
-                    table = dynamodb.Table(dbname)
+                    table = dynamodb.Table(DB_TABLE)
                     print("Delete request initiated by " + requester + " for the following id: " + id)
                     response = table.delete_item(
                         Key={
@@ -542,8 +531,7 @@ class DatabaseLoader:
             print("Elevation request initiated by " +  requester + " for Account:" + account + " Role:" + role)
             groups = decodedToken['groups']
             print("idToken for " + requester + " contains the following groups " + str(groups))
-            SearchPrefix = os.environ['search_prefix']
-            groups = [x for x in groups if x.startswith(SearchPrefix)]
+            groups = [x for x in groups if x.startswith(SEARCH_PREFIX)]
             veryifymembership = [element for element in groups if account in element and role in element] 
             if not veryifymembership:
                 result = "The idToken for " + requester + " does not contain the requested elevation group"
@@ -551,9 +539,7 @@ class DatabaseLoader:
                 status_code = 400
             elif account and role and veryifymembership:
                 print("Verified that the idToken for " + requester + " contained the requested elevation group - Proceeding to DynamoDB verification...")
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+                table = dynamodb.Table(DB_TABLE)
                 now = datetime.now().strftime('%x %X')
                 response = table.query(
                     IndexName='request-status-index',
@@ -564,7 +550,6 @@ class DatabaseLoader:
                 items = response['Items']
                 if items:
                     print("Confirmed there is an approved active elevation request for " + requester + " - Initializing STS request for console access...")
-                    sts_connection = boto3.client('sts')
                     assumed_role_object = sts_connection.assume_role(
                         RoleArn="arn:aws:iam::" + account + ":role/" + role,
                         RoleSessionName= requester + "-" + role,
@@ -627,8 +612,7 @@ class DatabaseLoader:
             print("Elevation request initiated by " +  requester + " for Account:" + account + " Role:" + role)
             groups = decodedToken['groups']
             print("idToken for " + requester + " contains the following groups " + str(groups))
-            SearchPrefix = os.environ['search_prefix']
-            groups = [x for x in groups if x.startswith(SearchPrefix)]
+            groups = [x for x in groups if x.startswith(SEARCH_PREFIX)]
             veryifymembership = [element for element in groups if account in element and role in element] 
             if not veryifymembership:
                 result = "The idToken for " + requester + " does not contain the requested elevation group"
@@ -636,9 +620,7 @@ class DatabaseLoader:
                 status_code = 400
             elif account and role and veryifymembership:
                 print("Verified that the idToken for " + requester + " contained the requested elevation group - Proceeding to DynamoDB verification...")
-                dynamodb = boto3.resource('dynamodb')
-                dbname = os.environ['db_table']
-                table = dynamodb.Table(dbname)
+                table = dynamodb.Table(DB_TABLE)
                 now = datetime.now().strftime('%x %X')
                 response = table.query(
                     IndexName='request-status-index',
@@ -649,7 +631,6 @@ class DatabaseLoader:
                 items = response['Items']
                 if items:
                     print("Confirmed there is an approved active elevation request for " + requester + " - Initializing STS request for CLI credentials...")
-                    sts_connection = boto3.client('sts')
                     assumed_role_object = sts_connection.assume_role(
                         RoleArn="arn:aws:iam::" + account + ":role/" + role,
                         RoleSessionName= requester + "-" + role,
