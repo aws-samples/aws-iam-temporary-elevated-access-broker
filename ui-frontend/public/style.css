@@ -1,0 +1,123 @@
+.centered {
+    text-align: center;
+}
+
+.left {
+    text-align: left;
+}
+
+.back_ground_white {
+    background-color: White;
+}
+
+.back_ground_aqua_marine {
+    background-color: Aquamarine;
+}
+
+.back_ground_alice_blue {
+    background-color: AliceBlue;
+}
+
+.back_ground_light_sky_blue {
+    background-color: LightSkyBlue;
+}
+
+.back_ground_blue {
+    background-color: Blue;
+}
+
+.back_ground_orange {
+    background-color: Orange;
+}
+
+.back_ground_red {
+    background-color: Red;
+}
+
+.back_ground_misty_rose {
+    background-color: MistyRose;
+}
+
+.back_ground_light_salmon {
+    background-color: LightSalmon;
+}
+
+.back_ground_medium_orchid {
+    background-color: MediumOrchid;
+}
+
+.back_ground_peach_puff {
+    background-color: PeachPuff;
+}
+
+.back_ground_pale_violet_red {
+    background-color: PaleVioletRed;
+}
+
+.back_ground_lavender {
+    background-color: Lavender;
+}
+
+.back_ground_light_cyan {
+    background-color: LightCyan;
+}
+
+.back_ground_black {
+    background-color: Black;
+}
+
+.back_ground_light_pink {
+    background-color: LightPink;
+}
+
+.back_ground_light_blue {
+    background-color: LightBlue;
+}
+
+.color_blue {
+    color: Blue;
+}
+
+.color_light_blue {
+    color: LightBlue;
+}
+
+.color_deep_sky_blue {
+    color: DeepSkyBlue;
+}
+
+.color_dodger_blue {
+    color: DodgerBlue;
+}
+
+.color_dark_blue {
+    color: DarkBlue;
+}
+
+.color_aqua_marine {
+    color: Aquamarine;
+}
+
+.color_green {
+    color: Green;
+}
+
+.color_orange {
+    color: Orange;
+}
+
+.color_dark_orange {
+    color: DarkOrange;
+}
+
+.border_black {
+    border-color: black;
+}
+
+.border_white {
+    border-color: white;
+}
+
+.bold_text {
+    font-weight: bold;
+}

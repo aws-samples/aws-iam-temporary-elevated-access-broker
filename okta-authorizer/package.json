@@ -1,0 +1,15 @@
+{
+  "name": "oktalambaauthorizer",
+  "version": "1.0.0",
+  "description": "Verifies Okta access and ID tokens by fetching the public keys from the JWKS endpoint of the authorization server.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@okta/jwt-verifier": "^2.3.0",
+    "jwt-decode": "^3.1.2"
+  }
+}
