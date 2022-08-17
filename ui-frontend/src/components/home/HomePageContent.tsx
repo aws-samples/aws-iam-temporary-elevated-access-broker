@@ -1,5 +1,5 @@
 import React, {FunctionComponent, useEffect, useState} from 'react';
-import {ColumnLayout, Column, Container, Box, Button} from "aws-northstar";
+import {ColumnLayout, Container, Box, Button} from "aws-northstar";
 import Stack from "aws-northstar/layouts/Stack";
 import './styles.css';
 import TEA from "./TEA.png";
