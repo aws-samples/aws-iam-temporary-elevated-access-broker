@@ -168,7 +168,7 @@ const PendingTable: FunctionComponent = () => {
             return result;
           });
 
-      let requests = await getPendingRequests(userInfo.user).then(
+      let requests = await getPendingRequests(userInfo.token).then(
           (result: IRequest[]) => {
             return result;
           });
