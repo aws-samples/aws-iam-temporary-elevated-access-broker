@@ -263,6 +263,7 @@ function get_roles(account:string,userInfo: IUserInfo) {
 function get_accounts_values(userInfo: IUserInfo) {
   let accounts = get_accounts(userInfo)
   let list: Array<any> = [];
+  accounts.sort();
   for (var account of accounts) {
     list.push({label: account, value: account});
   }
