@@ -7,7 +7,6 @@ import Table, { Column } from 'aws-northstar/components/Table';
 import {deleteRequest, getRequests, invokeFederateConsole, invokeFederateCli} from "../../data";
 import {ICredential, IRequest, ReduxRoot} from "../../interfaces";
 import '../home/styles.css';
-import Clipboard from '@react-native-clipboard/clipboard';
 
 import {
   ExpandableSection,
@@ -122,27 +121,27 @@ const RequestTable: FunctionComponent = () => {
 
     const copyJSONToClipboard = () => {
       let content = getJSON(cli)
-      Clipboard.setString(content)
+      navigator.clipboard.writeText(content);
     }
 
     const copyBashToClipboard = () => {
       let content = getBash(cli)
-      Clipboard.setString(content)
+      navigator.clipboard.writeText(content);
     }
 
     const copyFishToClipboard = () => {
       let content = getFish(cli)
-      Clipboard.setString(content)
+      navigator.clipboard.writeText(content);
     }
 
     const copyPowershellToClipboard = () => {
       let content = getPowershell(cli)
-      Clipboard.setString(content)
+      navigator.clipboard.writeText(content);
     }
 
     const copyWindowsToClipboard = () => {
       let content = getWindows(cli)
-      Clipboard.setString(content)
+      navigator.clipboard.writeText(content);
     }
 
     return (
