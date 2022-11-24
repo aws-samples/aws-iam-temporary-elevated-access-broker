@@ -130,7 +130,6 @@ Commandline:
 
 ```
 aws cloudformation create-stack \
---profile administrator \
 --stack-name your-stack-name \
 --template-url https://your-bucket-name.amazonaws.com/packaged-template.yaml \
 --capabilities CAPABILITY_NAMED_IAM \
