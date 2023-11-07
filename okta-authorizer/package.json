@@ -9,7 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@okta/jwt-verifier": "^2.3.0",
+    "@okta/jwt-verifier": "^3.0.1",
     "jwt-decode": "^3.1.2"
   }
 }
